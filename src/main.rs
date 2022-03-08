@@ -137,7 +137,7 @@ fn setup_udp_frame(pframe : &mut frame_t, sAddr : in_addr, port : u32, dataLen :
 }
 
 #[cfg(target_os = "linux")]
-fn timval_set(tv : &libc::timeval, timeout : i64)
+fn timval_set(tv : &mut libc::timeval, timeout : i64)
 {
 	tv.tv_sec = timeout / 1000;
 	tv.tv_usec = (timeout % 1000) * 10;
