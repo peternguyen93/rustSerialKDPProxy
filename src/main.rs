@@ -46,20 +46,6 @@ unsafe extern "C" fn serial_putc(chr : c_char)
 	}
 }
 
-#[derive(Parser, Debug)]
-#[clap(author, version, about, long_about = None)]
-struct SerialKDPArg {
-	/// The pattern to look fr
-	#[clap(parse(from_os_str))]
-	serial_path : std::path::PathBuf, // store serial device path
-	#[clap(short, long)]
-	listen : Option<String>,
-	#[clap(short, long, default_value_t = 4444)]
-	port   : u32,
-	#[clap(short, long, default_value_t = 0)]
-	verbose : u8
-}
-
 static DEFAULT_LISTEN_IP : &str = "0.0.0.0";
 
 fn set_termopts(serial_dev_fd : i32)
@@ -341,6 +327,20 @@ fn serialKDPProxy(listen_ip : &String, port : u32)
 	}
 }
 
+#[derive(Parser, Debug)]
+#[clap(author, version, about, long_about = None)]
+struct SerialKDPArg {
+	/// The pattern to look fr
+	#[clap(parse(from_os_str))]
+	serial_path : std::path::PathBuf, // store serial device path
+	#[clap(short, long)]
+	listen : Option<String>,
+	#[clap(short, long, default_value_t = 4444)]
+	port   : u32,
+	#[clap(short, long, default_value_t = 0)]
+	verbose : u8
+}
+
 fn main()
 {
 	let serial_path : std::path::PathBuf;
@@ -373,25 +373,6 @@ fn main()
 
 		if serial_fd < 0 {
 			print!("\n[!] Trying to open {} as unix socket...", raw_serial_path);
-			// try again with unix socket
-			// let mut unix_sock : libc::sockaddr_un = std::mem::zeroed();
-			// unix_sock.sun_family = libc::AF_UNIX as u16;
-
-			// if raw_serial_path.len() > (std::mem::size_of::<libc::sockaddr_un>() - 2) {
-			//     panic!("[!] Unix socket path is overflow");
-			// }
-
-			// libc::strncpy(std::ptr::addr_of_mut!(unix_sock.sun_path) as *mut i8,
-			//     std::ptr::addr_of!(raw_serial_path) as *const i8, raw_serial_path.len());
-			// serial_fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
-			// if serial_fd < - 1 {
-			//     panic!("[!] Unable to open serial device {}", raw_serial_path);
-			// }
-
-			// if connect(serial_fd, std::ptr::addr_of_mut!(unix_sock) as *const sockaddr,
-			//             std::mem::size_of::<libc::sockaddr_un>() as u32) < 0 {
-			//     panic!("[!] Unable to connect to unix sock {}", raw_serial_path);
-			// }
 			let unix_stream = UnixStream::connect(raw_serial_path).expect(
 									&format!("Unable to open device {} as unix socket", raw_serial_path));
 			serial_fd = unix_stream.into_raw_fd();
