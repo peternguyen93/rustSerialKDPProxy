@@ -5,23 +5,28 @@
 use core::panic;
 use std::{net::UdpSocket, os::unix::prelude::IntoRawFd};
 use std::os::unix::net::UnixStream;
-use std::os::raw::{c_void, c_char};
 use std::io::{self, Write};
-use libc;
 use clap::Parser;
-include!("./bindings.rs");
+use libc::{c_void, c_char, sockaddr_in};
 
-static mut opt_verbose : bool = false;
-static mut g_linecount : u32 = 0; 
-static mut serial_fd : i32 = -1;
-static mut out_ip_id : u16 = 0;
+mod kdp_export;
+use kdp_export::*;
 
-const REVERSE_VIDEO : &str = "\x1b[7m";
-const NORMAL_VIDEO : &str = "\x1b[0m";
+static mut opt_verbose: bool = false;
+static mut g_linecount: u32 = 0; 
+static mut serial_fd: i32 = -1;
+static mut out_ip_id: u16 = 0;
 
-unsafe extern "C" fn serial_putc(chr : c_char)
+const REVERSE_VIDEO: &str = "\x1b[7m";
+const NORMAL_VIDEO: &str = "\x1b[0m";
+
+static DEFAULT_LISTEN_IP: &str = "0.0.0.0";
+static client_macaddr: [u8 ; ETHER_ADDR_LEN as usize] = [b's', b'e', b'r', b'i', b'a', b'l'];
+static our_macaddr: [u8 ; ETHER_ADDR_LEN as usize]    = [b'f', b'o', b'o', b'b', b'a', b'r'];
+
+unsafe extern "C" fn serial_putc(chr: c_char)
 {
-	assert!(serial_fd != -1, "Serial port doesn't open");
+	assert!(serial_fd != -1, "Serial port didn't open");
 
 	assert!(libc::write(serial_fd, std::ptr::addr_of!(chr) as *mut c_void, 1) == 1, "Unable to write data to serial_fd");
 	
@@ -46,15 +51,13 @@ unsafe extern "C" fn serial_putc(chr : c_char)
 	}
 }
 
-static DEFAULT_LISTEN_IP : &str = "0.0.0.0";
-
-fn set_termopts(serial_dev_fd : i32)
+fn set_termopts(serial_dev_fd: i32)
 {
 	let mut rc : i32;
 	unsafe {
-		let mut options : libc::termios = std::mem::zeroed();
+		let mut options: libc::termios = std::mem::zeroed();
+		
 		libc::tcgetattr(serial_dev_fd, std::ptr::addr_of_mut!(options));
-
 		rc = libc::cfsetispeed(std::ptr::addr_of_mut!(options), libc::B115200);
 		if rc == -1 {
 			panic!("[!] Error, could not set baud rate");
@@ -80,10 +83,7 @@ fn set_termopts(serial_dev_fd : i32)
 	}
 }
 
-static client_macaddr : [u8 ; ETHER_ADDR_LEN as usize] = [b's', b'e', b'r', b'i', b'a', b'l'];
-static our_macaddr : [u8 ; ETHER_ADDR_LEN as usize]    = [b'f', b'o', b'o', b'b', b'a', b'r'];
-
-fn setup_udp_frame(pframe : &mut frame_t, sAddr : in_addr, port : u32, dataLen : usize)
+fn setup_udp_frame(pframe: &mut frame_t, sAddr: libc::in_addr, port: u32, dataLen: usize)
 {
 	let sizeof_ip = std::mem::size_of::<ip>() as u32;
 	let sizeof_uphdr = std::mem::size_of::<udphdr>() as u32;
@@ -99,10 +99,11 @@ fn setup_udp_frame(pframe : &mut frame_t, sAddr : in_addr, port : u32, dataLen :
 
 		pframe.h.eh.ether_type = htons(ETHERTYPE_IP as u16);
 		pframe.h.ih.set_ip_v(4);
-		pframe.h.ih.set_ip_hl(sizeof_ip >> 2);
+		pframe.h.ih.set_ip_hl((sizeof_ip >> 2) as u8);
 		pframe.h.ih.ip_tos = 0;
 
 		let ip_len = sizeof_ip + sizeof_uphdr + dataLen as u32;
+
 		pframe.h.ih.ip_len = htons(ip_len as u16);
 		out_ip_id += 1;
 		pframe.h.ih.ip_id = htons(out_ip_id as u16);
@@ -113,31 +114,32 @@ fn setup_udp_frame(pframe : &mut frame_t, sAddr : in_addr, port : u32, dataLen :
 		pframe.h.ih.ip_src = sAddr;
 		pframe.h.ih.ip_dst.s_addr =  0xABADBABE; // FIXME: Endian.. little to little will be fine here.
 
-		let ip_sum_result = !ip_sum(std::ptr::addr_of_mut!(pframe.h.ih) as *mut u8, pframe.h.ih.ip_hl());
+		let ip_sum_result = !ip_sum(std::ptr::addr_of_mut!(pframe.h.ih) as *mut u8, pframe.h.ih.get_ip_hl() as u32);
+
 		pframe.h.ih.ip_sum = ip_sum_result.to_be();
-		pframe.h.uh.__bindgen_anon_1.__bindgen_anon_1.uh_sport = port as u16;
-		pframe.h.uh.__bindgen_anon_1.__bindgen_anon_1.uh_dport = htons(41139) as u16;
-		pframe.h.uh.__bindgen_anon_1.__bindgen_anon_1.uh_ulen = htons((sizeof_uphdr + dataLen as u32) as u16);
-		pframe.h.uh.__bindgen_anon_1.__bindgen_anon_1.uh_sum = 0;
+		pframe.h.uh.uh_sport = port as u16;
+		pframe.h.uh.uh_dport = htons(41139);
+		pframe.h.uh.uh_ulen = htons((sizeof_uphdr + dataLen as u32) as u16);
+		pframe.h.uh.uh_sum = 0;
 	}
 }
 
 #[cfg(target_os = "linux")]
-fn timval_set(tv : &mut libc::timeval, timeout : i64)
+fn timval_set(tv: &mut libc::timeval, timeout : i64)
 {
 	tv.tv_sec = timeout / 1000;
 	tv.tv_usec = (timeout % 1000) * 10;
 }
 
 #[cfg(target_os = "macos")]
-fn timval_set(tv : &mut libc::timeval, timeout : i64)
+fn timval_set(tv: &mut libc::timeval, timeout: i64)
 {
 	tv.tv_sec = timeout / 1000;
 	tv.tv_usec = (timeout as i32 % 1000) * 10;
 }
 
 #[cfg(target_os = "linux")]
-fn sockaddr_in_set(sockaddr : &mut libc::sockaddr_in, port : u16, s_addr : u32)
+fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 {
 	sockaddr.sin_family = libc::AF_INET as u16;
 	sockaddr.sin_port = port as u16;
@@ -145,14 +147,14 @@ fn sockaddr_in_set(sockaddr : &mut libc::sockaddr_in, port : u16, s_addr : u32)
 }
 
 #[cfg(target_os = "macos")]
-fn sockaddr_in_set(sockaddr : &mut libc::sockaddr_in, port : u16, s_addr : u32)
+fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 {
 	sockaddr.sin_family = libc::AF_INET as u8;
 	sockaddr.sin_port = port as u16;
 	sockaddr.sin_addr.s_addr = s_addr as u32;
 }
 
-fn working_pool(fds : &mut Vec<libc::pollfd>, timeout : i32) -> i32
+fn working_pool(fds: &mut Vec<libc::pollfd>, timeout: i32) -> i32
 {
 	unsafe {
 		let mut readfds : libc::fd_set  = std::mem::zeroed();
@@ -193,8 +195,8 @@ fn working_pool(fds : &mut Vec<libc::pollfd>, timeout : i32) -> i32
 			libc::perror("select".as_ptr() as *const i8);
 			return ret;
 		}
-		ret = 0;
 
+		ret = 0;
 		for i in 0..fds.len() {
 			fds[i].revents = 0;
 
@@ -220,7 +222,7 @@ fn working_pool(fds : &mut Vec<libc::pollfd>, timeout : i32) -> i32
 }
 
 
-fn serialKDPProxy(listen_ip : &String, port : u32)
+fn serialKDPProxy(listen_ip: &String, port: u32)
 {
 	let bindip = &format!("{}:{}", listen_ip, port);
 	let r_udp_sock = UdpSocket::bind(bindip).expect("Couldn't bind udp socket");
@@ -261,15 +263,13 @@ fn serialKDPProxy(listen_ip : &String, port : u32)
 										std::ptr::addr_of_mut!(sock_addr_size));
 
 				if opt_verbose {
-					eprintln!("Receiving {} bytes from {}:{}", bytesReceived,
-								std::ffi::CStr::from_ptr(inet_ntoa(sock_addr.sin_addr)).to_str().unwrap(),
-								sock_addr.sin_port);
+					eprintln!("Receiving {} bytes from {}:{}", bytesReceived, inet_ntoa(sock_addr.sin_addr).as_str(), sock_addr.sin_port);
 				}
 
 				setup_udp_frame(frame.as_mut(), sock_addr.sin_addr, sock_addr.sin_port as u32, bytesReceived as usize);
 				kdp_serialize_packet(frame.buf.as_ptr() as *mut u8,
 					(bytesReceived as usize + std::mem::size_of::<udp_ip_ether_frame_hdr>()) as u32,
-					Some(serial_putc));
+					serial_putc);
 				io::stderr().flush().unwrap();
 			} else if fds[0].revents != 0 {
 				eprintln!("[!] Unexpected revents of udp socket");
@@ -280,29 +280,27 @@ fn serialKDPProxy(listen_ip : &String, port : u32)
 
 				if libc::read(serial_fd, std::ptr::addr_of_mut!(chr) as *mut c_void, 1) == 1{
 					// serial_fd is readable
-					let mut input_len = SERIALIZE_READING;
+					let mut input_len: u32 = SERIALIZE::SERIALIZE_READING as u32;
 					let p_input_package = kdp_unserialize_packet(chr as u8, std::ptr::addr_of_mut!(input_len));
+
 					if !p_input_package.is_null() {
 						let p_kdp_package : Box<frame_t> = Box::new(std::ptr::read(p_input_package as *const frame_t));
 						if p_kdp_package.h.ih.ip_p == 17 {
 							// send data to udp_fd
 							let mut client_addr : libc::sockaddr_in = std::mem::zeroed();
-							// client_addr.sin_family = libc::AF_INET as u16;
-							// client_addr.sin_port = p_kdp_package.h.uh.__bindgen_anon_1.__bindgen_anon_1.uh_dport;
-							// client_addr.sin_addr.s_addr = p_kdp_package.h.ih.ip_dst.s_addr;
-							sockaddr_in_set(&mut client_addr, p_kdp_package.h.uh.__bindgen_anon_1.__bindgen_anon_1.uh_dport,
-								p_kdp_package.h.ih.ip_dst.s_addr);
+							sockaddr_in_set(&mut client_addr, p_kdp_package.h.uh.uh_dport, p_kdp_package.h.ih.ip_dst.s_addr);
 
 							libc::sendto(udp_fd,
 									p_kdp_package.buf.as_ptr().offset(std::mem::size_of::<udp_ip_ether_frame_hdr>() as isize) as *const c_void,
 									input_len as usize - std::mem::size_of::<udp_ip_ether_frame_hdr>(), 0,
 									std::ptr::addr_of_mut!(client_addr) as *const libc::sockaddr,
 									std::mem::size_of::<udp_ip_ether_frame_hdr>() as u32);
+						
 						} else {
 							eprintln!("[!] Unable to deserialize kdp package");
 						}
 					} else {
-						if input_len == SERIALIZE_WAIT_START {
+						if input_len == SERIALIZE::SERIALIZE_WAIT_START as u32 {
 							let b = chr as u8;
 
 							if (b >= 0x80) || (b > 26 && chr < ' ') {
