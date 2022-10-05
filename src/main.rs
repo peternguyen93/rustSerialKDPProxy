@@ -149,6 +149,8 @@ fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 #[cfg(target_os = "macos")]
 fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 {
+    // macOS requires to set sin_len field
+    sockaddr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
 	sockaddr.sin_family = libc::AF_INET as u8;
 	sockaddr.sin_port = port as u16;
 	sockaddr.sin_addr.s_addr = s_addr as u32;
@@ -253,6 +255,7 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 
 		while working_pool(&mut fds, -1) > 0 {
 			if (fds[0].revents & libc::POLLIN) != 0 {
+			    // handle incomming udp packet
 				let mut sock_addr : sockaddr_in = std::mem::zeroed();
 				let mut sock_addr_size : u32 = std::mem::size_of::<sockaddr_in>() as u32;
 				let bytesReceived : isize = libc::recvfrom(udp_fd,
@@ -271,11 +274,13 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 					(bytesReceived as usize + std::mem::size_of::<udp_ip_ether_frame_hdr>()) as u32,
 					serial_putc);
 				io::stderr().flush().unwrap();
+
 			} else if fds[0].revents != 0 {
 				eprintln!("[!] Unexpected revents of udp socket");
 			}
 
 			if (fds[1].revents & libc::POLLIN) != 0{
+				// handle incomming package from serial device
 				let mut chr : char = std::mem::zeroed();
 
 				if libc::read(serial_fd, std::ptr::addr_of_mut!(chr) as *mut c_void, 1) == 1{
@@ -290,17 +295,20 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 							let mut client_addr : libc::sockaddr_in = std::mem::zeroed();
 							sockaddr_in_set(&mut client_addr, p_kdp_package.h.uh.uh_dport, p_kdp_package.h.ih.ip_dst.s_addr);
 
-							libc::sendto(udp_fd,
+							// send kdp package to udp socket
+							let ret = libc::sendto(udp_fd,
 									p_kdp_package.buf.as_ptr().offset(std::mem::size_of::<udp_ip_ether_frame_hdr>() as isize) as *const c_void,
 									input_len as usize - std::mem::size_of::<udp_ip_ether_frame_hdr>(), 0,
 									std::ptr::addr_of_mut!(client_addr) as *const libc::sockaddr,
-									std::mem::size_of::<udp_ip_ether_frame_hdr>() as u32);
+									std::mem::size_of::<libc::sockaddr>() as u32);
+							assert_ne!(ret, -1, "Unable to send kdp package to UDP client");
 						
 						} else {
 							eprintln!("[!] Unable to deserialize kdp package");
 						}
 					} else {
-						if input_len == SERIALIZE::SERIALIZE_WAIT_START as u32 {
+					    // put the printable characters to stdout
+					    if input_len == SERIALIZE::SERIALIZE_WAIT_START as u32 {
 							let b = chr as u8;
 
 							if (b >= 0x80) || (b > 26 && chr < ' ') {
