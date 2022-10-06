@@ -6,9 +6,13 @@ use core::panic;
 use std::{net::UdpSocket, os::unix::prelude::IntoRawFd};
 use std::os::unix::net::UnixStream;
 use std::io::{self, Write};
-use clap::Parser;
-use libc::{c_void, c_char, sockaddr_in};
+use std::ptr::{addr_of_mut, addr_of, null_mut};
+use std::mem::{size_of, zeroed};
+use libc::{c_void, c_char, sockaddr, sockaddr_in, timeval, in_addr, termios,
+            sendto, recvfrom, select, write, tcgetattr, tcsetattr, putchar,
+            cfsetispeed, cfsetospeed, tcflush, perror};
 
+use clap::Parser;
 mod kdp_export;
 use kdp_export::*;
 
@@ -28,7 +32,7 @@ unsafe extern "C" fn serial_putc(chr: c_char)
 {
 	assert!(serial_fd != -1, "Serial port didn't open");
 
-	assert!(libc::write(serial_fd, std::ptr::addr_of!(chr) as *mut c_void, 1) == 1, "Unable to write data to serial_fd");
+	assert!(write(serial_fd, addr_of!(chr) as *mut c_void, 1) == 1, "Unable to write data to serial_fd");
 	
 	if g_linecount != 0 && (g_linecount % 16) == 0 {
 		g_linecount = 0;
@@ -55,15 +59,15 @@ fn set_termopts(serial_dev_fd: i32)
 {
 	let mut rc : i32;
 	unsafe {
-		let mut options: libc::termios = std::mem::zeroed();
+		let mut options: termios = zeroed();
 		
-		libc::tcgetattr(serial_dev_fd, std::ptr::addr_of_mut!(options));
-		rc = libc::cfsetispeed(std::ptr::addr_of_mut!(options), libc::B115200);
+		tcgetattr(serial_dev_fd, addr_of_mut!(options));
+		rc = cfsetispeed(addr_of_mut!(options), libc::B115200);
 		if rc == -1 {
 			panic!("[!] Error, could not set baud rate");
 		}
 
-		rc = libc::cfsetospeed(std::ptr::addr_of_mut!(options), libc::B115200);
+		rc = cfsetospeed(addr_of_mut!(options), libc::B115200);
 		if rc == -1 {
 			panic!("[!] Error, could not set baud rate");
 		}
@@ -75,18 +79,18 @@ fn set_termopts(serial_dev_fd: i32)
 		options.c_cc[libc::VMIN] = 1;
 		options.c_cc[libc::VTIME] = 5;
 
-		libc::tcflush(serial_dev_fd, libc::TCIFLUSH);
-		rc = libc::tcsetattr(serial_dev_fd, libc::TCSANOW, std::ptr::addr_of_mut!(options));
+		tcflush(serial_dev_fd, libc::TCIFLUSH);
+		rc = tcsetattr(serial_dev_fd, libc::TCSANOW, addr_of_mut!(options));
 		if rc == -1 {
 			panic!("[!] Error, call tcsetattr was failed");
 		}
 	}
 }
 
-fn setup_udp_frame(pframe: &mut frame_t, sAddr: libc::in_addr, port: u32, dataLen: usize)
+fn setup_udp_frame(pframe: &mut frame_t, sAddr: in_addr, port: u32, dataLen: usize)
 {
-	let sizeof_ip = std::mem::size_of::<ip>() as u32;
-	let sizeof_uphdr = std::mem::size_of::<udphdr>() as u32;
+	let sizeof_ip = size_of::<ip>() as u32;
+	let sizeof_uphdr = size_of::<udphdr>() as u32;
 
 	unsafe {
 		for i in 0..client_macaddr.len() {
@@ -114,7 +118,7 @@ fn setup_udp_frame(pframe: &mut frame_t, sAddr: libc::in_addr, port: u32, dataLe
 		pframe.h.ih.ip_src = sAddr;
 		pframe.h.ih.ip_dst.s_addr =  0xABADBABE; // FIXME: Endian.. little to little will be fine here.
 
-		let ip_sum_result = !ip_sum(std::ptr::addr_of_mut!(pframe.h.ih) as *mut u8, pframe.h.ih.get_ip_hl() as u32);
+		let ip_sum_result = !ip_sum(addr_of_mut!(pframe.h.ih) as *mut u8, pframe.h.ih.get_ip_hl() as u32);
 
 		pframe.h.ih.ip_sum = ip_sum_result.to_be();
 		pframe.h.uh.uh_sport = port as u16;
@@ -125,21 +129,21 @@ fn setup_udp_frame(pframe: &mut frame_t, sAddr: libc::in_addr, port: u32, dataLe
 }
 
 #[cfg(target_os = "linux")]
-fn timval_set(tv: &mut libc::timeval, timeout : i64)
+fn timval_set(tv: &mut timeval, timeout : i64)
 {
 	tv.tv_sec = timeout / 1000;
 	tv.tv_usec = (timeout % 1000) * 10;
 }
 
 #[cfg(target_os = "macos")]
-fn timval_set(tv: &mut libc::timeval, timeout: i64)
+fn timval_set(tv: &mut timeval, timeout: i64)
 {
 	tv.tv_sec = timeout / 1000;
 	tv.tv_usec = (timeout as i32 % 1000) * 10;
 }
 
 #[cfg(target_os = "linux")]
-fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
+fn sockaddr_in_set(sockaddr: &mut sockaddr_in, port: u16, s_addr: u32)
 {
 	sockaddr.sin_family = libc::AF_INET as u16;
 	sockaddr.sin_port = port as u16;
@@ -150,7 +154,7 @@ fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 {
     // macOS requires to set sin_len field
-    sockaddr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+    sockaddr.sin_len = size_of::<libc::sockaddr_in>() as u8;
 	sockaddr.sin_family = libc::AF_INET as u8;
 	sockaddr.sin_port = port as u16;
 	sockaddr.sin_addr.s_addr = s_addr as u32;
@@ -159,19 +163,19 @@ fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 fn working_pool(fds: &mut Vec<libc::pollfd>, timeout: i32) -> i32
 {
 	unsafe {
-		let mut readfds : libc::fd_set  = std::mem::zeroed();
-		let mut writefds : libc::fd_set = std::mem::zeroed();
-		let mut errfds : libc::fd_set   = std::mem::zeroed();
-		let mut tv : libc::timeval = std::mem::zeroed();
+		let mut readfds : libc::fd_set  = zeroed();
+		let mut writefds : libc::fd_set = zeroed();
+		let mut errfds : libc::fd_set   = zeroed();
+		let mut tv : timeval = zeroed();
 		let mut maxfd = 0;
 		let mut ret;
 		let tv_ptr ;
 
 		if timeout > 0 {
 			timval_set(&mut tv, timeout as i64);
-			tv_ptr = std::ptr::addr_of_mut!(tv);
+			tv_ptr = addr_of_mut!(tv);
 		} else {
-			tv_ptr = std::ptr::null_mut() as *mut libc::timeval;
+			tv_ptr = null_mut() as *mut timeval;
 		}
 
 		for i in 0..fds.len() {
@@ -180,21 +184,19 @@ fn working_pool(fds: &mut Vec<libc::pollfd>, timeout: i32) -> i32
 			}
 
 			if (fds[i].events & libc::POLLIN) != 0 {
-				libc::FD_SET(fds[i].fd, std::ptr::addr_of_mut!(readfds));
+				libc::FD_SET(fds[i].fd, addr_of_mut!(readfds));
 			}
 
 			if (fds[i].events & libc::POLLOUT) != 0 {
-				libc::FD_SET(fds[i].fd, std::ptr::addr_of_mut!(writefds));
+				libc::FD_SET(fds[i].fd, addr_of_mut!(writefds));
 			}
 		}
 
 		
-		ret = libc::select(maxfd, std::ptr::addr_of_mut!(readfds),
-						std::ptr::addr_of_mut!(writefds),
-						std::ptr::addr_of_mut!(errfds),
-						tv_ptr);
+		ret = select(maxfd, addr_of_mut!(readfds), addr_of_mut!(writefds),
+						addr_of_mut!(errfds), tv_ptr);
 		if ret <= 0 {
-			libc::perror("select".as_ptr() as *const i8);
+			perror("select".as_ptr() as *const i8);
 			return ret;
 		}
 
@@ -202,15 +204,15 @@ fn working_pool(fds: &mut Vec<libc::pollfd>, timeout: i32) -> i32
 		for i in 0..fds.len() {
 			fds[i].revents = 0;
 
-			if libc::FD_ISSET(fds[i].fd, std::ptr::addr_of_mut!(readfds)) {
+			if libc::FD_ISSET(fds[i].fd, addr_of_mut!(readfds)) {
 				fds[i].revents |= libc::POLLIN;
 			}
 
-			if libc::FD_ISSET(fds[i].fd, std::ptr::addr_of_mut!(writefds)) {
+			if libc::FD_ISSET(fds[i].fd, addr_of_mut!(writefds)) {
 				fds[i].revents |= libc::POLLOUT;
 			}
 
-			if libc::FD_ISSET(fds[i].fd, std::ptr::addr_of_mut!(writefds)) {
+			if libc::FD_ISSET(fds[i].fd, addr_of_mut!(writefds)) {
 				fds[i].revents |= libc::POLLERR;
 			}
 
@@ -256,23 +258,25 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 		while working_pool(&mut fds, -1) > 0 {
 			if (fds[0].revents & libc::POLLIN) != 0 {
 			    // handle incomming udp packet
-				let mut sock_addr : sockaddr_in = std::mem::zeroed();
-				let mut sock_addr_size : u32 = std::mem::size_of::<sockaddr_in>() as u32;
-				let bytesReceived : isize = libc::recvfrom(udp_fd,
-										frame.buf.as_ptr().offset(std::mem::size_of::<udp_ip_ether_frame_hdr>() as isize) as *mut c_void,
-										std::mem::size_of::<frame_t>() - std::mem::size_of::<udp_ip_ether_frame_hdr>(),
+				let mut sock_addr : sockaddr_in = zeroed();
+				let mut sock_addr_size : u32 = size_of::<sockaddr_in>() as u32;
+				let bytesReceived : isize = recvfrom(udp_fd,
+										frame.buf.as_ptr().offset(size_of::<udp_ip_ether_frame_hdr>() as isize) as *mut c_void,
+										size_of::<frame_t>() - size_of::<udp_ip_ether_frame_hdr>(),
 										0,
-										std::ptr::addr_of_mut!(sock_addr) as *mut libc::sockaddr,
-										std::ptr::addr_of_mut!(sock_addr_size));
+										addr_of_mut!(sock_addr) as *mut sockaddr,
+										addr_of_mut!(sock_addr_size));
 
 				if opt_verbose {
 					eprintln!("Receiving {} bytes from {}:{}", bytesReceived, inet_ntoa(sock_addr.sin_addr).as_str(), sock_addr.sin_port);
 				}
 
 				setup_udp_frame(frame.as_mut(), sock_addr.sin_addr, sock_addr.sin_port as u32, bytesReceived as usize);
+				
 				kdp_serialize_packet(frame.buf.as_ptr() as *mut u8,
-					(bytesReceived as usize + std::mem::size_of::<udp_ip_ether_frame_hdr>()) as u32,
-					serial_putc);
+					                (bytesReceived as usize + size_of::<udp_ip_ether_frame_hdr>()) as u32,
+					                serial_putc);
+				
 				io::stderr().flush().unwrap();
 
 			} else if fds[0].revents != 0 {
@@ -281,26 +285,25 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 
 			if (fds[1].revents & libc::POLLIN) != 0{
 				// handle incomming package from serial device
-				let mut chr : char = std::mem::zeroed();
+				let mut chr : char = zeroed();
 
-				if libc::read(serial_fd, std::ptr::addr_of_mut!(chr) as *mut c_void, 1) == 1{
+				if libc::read(serial_fd, addr_of_mut!(chr) as *mut c_void, 1) == 1{
 					// serial_fd is readable
 					let mut input_len: u32 = SERIALIZE::SERIALIZE_READING as u32;
-					let p_input_package = kdp_unserialize_packet(chr as u8, std::ptr::addr_of_mut!(input_len));
+					let p_input_package = kdp_unserialize_packet(chr as u8, addr_of_mut!(input_len));
 
 					if !p_input_package.is_null() {
 						let p_kdp_package : Box<frame_t> = Box::new(std::ptr::read(p_input_package as *const frame_t));
 						if p_kdp_package.h.ih.ip_p == 17 {
 							// send data to udp_fd
-							let mut client_addr : libc::sockaddr_in = std::mem::zeroed();
+							let mut client_addr : sockaddr_in = zeroed();
 							sockaddr_in_set(&mut client_addr, p_kdp_package.h.uh.uh_dport, p_kdp_package.h.ih.ip_dst.s_addr);
 
 							// send kdp package to udp socket
-							let ret = libc::sendto(udp_fd,
-									p_kdp_package.buf.as_ptr().offset(std::mem::size_of::<udp_ip_ether_frame_hdr>() as isize) as *const c_void,
-									input_len as usize - std::mem::size_of::<udp_ip_ether_frame_hdr>(), 0,
-									std::ptr::addr_of_mut!(client_addr) as *const libc::sockaddr,
-									std::mem::size_of::<libc::sockaddr>() as u32);
+							let ret = sendto(udp_fd,
+									p_kdp_package.buf.as_ptr().offset(size_of::<udp_ip_ether_frame_hdr>() as isize) as *const c_void,
+									input_len as usize - size_of::<udp_ip_ether_frame_hdr>(), 0,
+									addr_of_mut!(client_addr) as *const sockaddr, size_of::<sockaddr>() as u32);
 							assert_ne!(ret, -1, "Unable to send kdp package to UDP client");
 						
 						} else {
@@ -318,7 +321,7 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 								print!("{}^{}{}", REVERSE_VIDEO, (b + '@' as u8) as char, NORMAL_VIDEO);
 								io::stdout().flush().unwrap();
 							} else {
-								libc::putchar(b as i32);
+								putchar(b as i32);
 							}
 						}
 					}
