@@ -15,6 +15,8 @@ use libc::{c_void, c_char, sockaddr, sockaddr_in, timeval, in_addr, termios,
 use clap::Parser;
 mod kdp_export;
 use kdp_export::*;
+mod virt_connect;
+use virt_connect::*;
 
 static mut opt_verbose: bool = false;
 static mut g_linecount: u32 = 0; 
@@ -160,7 +162,7 @@ fn sockaddr_in_set(sockaddr: &mut libc::sockaddr_in, port: u16, s_addr: u32)
 	sockaddr.sin_addr.s_addr = s_addr as u32;
 }
 
-fn working_pool(fds: &mut Vec<libc::pollfd>, timeout: i32) -> i32
+fn working_pool(fds: &mut [libc::pollfd; 3], timeout: i32) -> i32
 {
 	unsafe {
 		let mut readfds : libc::fd_set  = zeroed();
@@ -235,23 +237,25 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 	println!("[+] Waiting for receving packaget at {}...", bindip);
 
 	unsafe {
-		let mut fds : Vec<libc::pollfd> = Vec::new();
-		fds.push(libc::pollfd {
-			fd: udp_fd,
-			events : libc::POLLIN,
-			revents : 0
-		});
-		fds.push(libc::pollfd {
-			fd: serial_fd,
-			events : libc::POLLIN,
-			revents : 0
-		});
-		fds.push(libc::pollfd {
-			fd: libc::STDOUT_FILENO,
-			events : libc::POLLIN,
-			revents : 0
-		});
-		let mut frame : Box<frame_t> = Box::new(frame_t {
+        let mut fds: [libc::pollfd; 3] = [
+            libc::pollfd {
+                fd: udp_fd,
+                events: libc::POLLIN,
+                revents: 0
+            },
+            libc::pollfd {
+			    fd: serial_fd,
+			    events: libc::POLLIN,
+			    revents: 0
+		    },
+            libc::pollfd {
+			    fd: libc::STDOUT_FILENO,
+			    events: libc::POLLIN,
+			    revents: 0
+		    }
+        ];
+
+        let mut frame : Box<frame_t> = Box::new(frame_t {
 			buf : std::mem::zeroed(),
 		});
 
@@ -340,8 +344,10 @@ fn serialKDPProxy(listen_ip: &String, port: u32)
 #[clap(author, version, about, long_about = None)]
 struct SerialKDPArg {
 	/// The pattern to look fr
-	#[clap(parse(from_os_str))]
-	serial_path : std::path::PathBuf, // store serial device path
+    #[clap(short, long)]
+    kvm_name : Option<String>,
+    #[clap(short, long)]
+	serial_path : Option<std::path::PathBuf>, // store serial device path
 	#[clap(short, long)]
 	listen : Option<String>,
 	#[clap(short, long, default_value_t = 4444)]
@@ -352,21 +358,28 @@ struct SerialKDPArg {
 
 fn main()
 {
-	let serial_path : std::path::PathBuf;
-	let listen_ip : String;
-	let port : u32;
+	let mut serial_path: std::path::PathBuf = std::path::PathBuf::new();
+	let listen_ip: String;
+	let port: u32;
 	let args = SerialKDPArg::parse();
 
-	serial_path = args.serial_path;
+    if !args.serial_path.is_none(){
+        serial_path.push(args.serial_path.unwrap());
+    }
+    
+    else if !args.kvm_name.is_none() {
+        let kvm_name = args.kvm_name.unwrap();
+        let pty_device = kvm_extract_pty(&kvm_name.as_str());
+        serial_path.push(pty_device);
+    } else {
+        panic!("You must specify serial_path or kvm_name");
+    }
+
 	listen_ip = args.listen.unwrap_or(DEFAULT_LISTEN_IP.to_string());
 	port = args.port;
 
 	unsafe {
 		opt_verbose = args.verbose == 1;
-	}
-
-	if !serial_path.exists() {
-		panic!("Serial port {} doesn't exists.", serial_path.to_str().unwrap());
 	}
 
 	unsafe {

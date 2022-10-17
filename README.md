@@ -14,5 +14,9 @@
 		```
 * Start a proxy with pts device in KVM :
 		```
-		$ sudo ./target/release/rustSerialKDPProxy /dev/pts/<number> --port <port> --listen <interface>
+		$ sudo ./target/release/rustSerialKDPProxy -k "<virtual machine name>" --port <port> --listen <interface>
+		```
+* Start a proxy with pts device / unix socket :
+		```
+		$ sudo ./target/release/rustSerialKDPProxy -s "/dev/pts/<num> or </path/unix.sock>" --port <port> --listen <interface>
 		```
