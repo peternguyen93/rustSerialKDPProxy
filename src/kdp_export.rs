@@ -76,7 +76,7 @@ pub enum SERIALIZE {
 }
 
 extern "C" {
-    pub fn ip_sum(buffer: *mut c_uchar, hlen: u32) -> u16;
+    //pub fn ip_sum(buffer: *mut c_uchar, hlen: u32) -> u16;
     pub fn kdp_serialize_packet(buffer: *mut c_uchar, len: u32, func: unsafe extern "C" fn(chr: c_char));
     pub fn kdp_unserialize_packet (chr: c_uchar, out_len: *mut u32) -> *mut c_uchar;
 }
@@ -99,4 +99,29 @@ pub fn inet_ntoa(sin_addr: libc::in_addr) -> String
         }
     }
     return ip_addr;
+}
+
+pub fn ip_sum(buffer: *mut u8, hlen: u32) -> u16
+{
+    let mut high: u32 = 0;
+    let mut low: u32 = 0;
+    let mut pbuffer: *mut u8 = buffer;
+    let mut tlen: u32 = hlen;
+
+    unsafe {
+        while tlen > 0 {
+            low += pbuffer.add(1).read() as u32 + pbuffer.add(3).read() as u32;
+            high += pbuffer.read() as u32 + pbuffer.add(2).read() as u32;
+            pbuffer = pbuffer.add(4);
+            tlen -= 1;
+        }
+    }
+
+	let mut sum: u32 = (high << 8) + low;
+	sum = (sum >> 16) + (sum & 65535);
+
+    if sum > 0xFFFF {
+        return (sum - 0xFFFF) as u16;
+    }
+	return sum as u16;
 }
